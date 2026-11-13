@@ -17,17 +17,20 @@ from plotly.subplots import make_subplots
 pn.extension("plotly", "tabulator", sizing_mode="stretch_width")
 
 # ================================================================ données
-def data_path(name):
-    """Chemin local avec `panel serve` ; URL relative à la page dans le navigateur (version GitHub Pages)."""
+def read_data(name):
+    """Fichier local avec `panel serve`. Dans le navigateur (GitHub Pages), c'est le navigateur qui télécharge
+    le fichier : pandas ne reçoit que le texte. (Si pandas lisait l'URL lui-même, il verrait l'en-tête
+    « gzip » du serveur et tenterait de décompresser un texte déjà décompressé -> BadGzipFile.)"""
     if "pyodide" in sys.modules:
         from urllib.parse import urljoin
         import js
-        return urljoin(str(js.location.href), f"data/clean/{name}")
-    return f"data/clean/{name}"
+        from pyodide.http import open_url
+        return pd.read_csv(open_url(urljoin(str(js.location.href), f"data/clean/{name}")))
+    return pd.read_csv(f"data/clean/{name}")
 
 
-PANEL = pd.read_csv(data_path("panel.csv"))
-PROFILES = pd.read_csv(data_path("countries.csv"))
+PANEL = read_data("panel.csv")
+PROFILES = read_data("countries.csv")
 PANEL = PANEL.merge(PROFILES[["iso3", "profile"]], on="iso3")
 NAMES = PANEL.drop_duplicates("iso3").set_index("iso3")["country"].sort_values()
 
