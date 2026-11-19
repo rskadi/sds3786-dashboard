@@ -79,13 +79,22 @@ def load_metadata():
     return meta
 
 
+MAX_GAP = 2  # longueur maximale (en années) d'un trou que l'on comble
+
+
+def fill_short_gaps(s, max_gap=MAX_GAP):
+    """Interpolation linéaire des trous d'au plus `max_gap` années, entourés de vraies valeurs.
+    Un trou plus long reste entièrement vide (`interpolate(limit=2)` en remplirait les 2 premières années)."""
+    missing = s.isna()
+    gap_len = missing.groupby((~missing).cumsum()).transform("sum")  # taille du trou auquel appartient chaque année
+    return s.mask(missing & (gap_len <= max_gap), s.interpolate(limit_area="inside"))
+
+
 def impute(panel):
-    """Interpolation linéaire à l'intérieur de chaque pays, seulement pour les trous de 2 ans max."""
+    """Comble, pays par pays, les trous de 2 ans ou moins ; les trous plus longs et les bords restent vides."""
     panel = panel.sort_values(["iso3", "year"]).copy()
     before = panel[INFL_COLS].isna().sum()
-    panel[INFL_COLS] = panel.groupby("iso3")[INFL_COLS].transform(
-        lambda s: s.interpolate(limit=2, limit_area="inside")
-    )
+    panel[INFL_COLS] = panel.groupby("iso3")[INFL_COLS].transform(fill_short_gaps)
     filled = before - panel[INFL_COLS].isna().sum()
     print("Valeurs imputées par interpolation :", filled.to_dict())
     return panel

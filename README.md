@@ -11,6 +11,7 @@ et cette relation diffère-t-elle selon les pays et dans le temps ?
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python prepare_data.py      # data/raw -> data/clean
+.venv/bin/jupyter lab analyse_donnees.ipynb   # (optionnel) AED et préparation pas à pas
 .venv/bin/panel serve app.py --show   # http://localhost:5006/app
 ```
 
@@ -28,6 +29,7 @@ navigateur (Pyodide) : le premier chargement prend 10–30 s, ensuite tout est i
 | Fichier | Rôle |
 |---|---|
 | `prepare_data.py` | Nettoyage, melt, jointure des 3 sources, imputation, regroupement KMeans |
+| `analyse_donnees.ipynb` | Les mêmes étapes expliquées, avec l'AED en graphiques (exécuté, résultats inclus) |
 | `app.py` | Tableau de bord (filtres, calculs, figures, mise en page) |
 | `build_pages.sh` / `docs/` | Version statique pour GitHub Pages |
 | `data/raw/` | Données brutes (Kaggle + API Banque mondiale) |
@@ -64,7 +66,7 @@ code FMI, `Indicator Type` (constante), `Note`, colonnes vides.
 ## Méthodes d'analyse (exigences des labos)
 
 - **AED / nettoyage / imputation** (`prepare_data.py`) : encodage latin-1 corrigé, agrégats retirés via JD3,
-  melt large → long, interpolation linéaire des trous ≤ 2 ans par pays (46 valeurs alimentaires, 94 énergie),
+  melt large → long, interpolation linéaire par pays des seuls trous de 2 ans ou moins, les trous plus longs restant vides (22 valeurs alimentaires, 20 énergie),
   hyperinflation (> 50 %) masquée par défaut dans le tableau de bord (désactivable).
 - **Regroupement** : KMeans (k = 4) sur 5 attributs par pays — chômage médian, inflation médiane, écart-type de chacun,
   r de Phillips (inflation en log signé, standardisation). Les profils sont nommés automatiquement d'après leurs médianes.
