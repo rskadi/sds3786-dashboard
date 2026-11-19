@@ -37,7 +37,8 @@ NAMES = PANEL.drop_duplicates("iso3").set_index("iso3")["country"].sort_values()
 MEASURES = {"Globale": "inflation", "Alimentaire": "food_inflation", "Énergie": "energy_inflation"}
 SHOCKS = {1997: "Crise asiatique", 2008: "Crise financière", 2020: "COVID-19"}
 PERIODS = [(1991, 2000), (2001, 2010), (2011, 2021)]
-HYPER = 50   # hyperinflation exclue par défaut (valeurs extrêmes, ex. Venezuela)
+HYPER = 50   # hyperinflation toujours masquée (valeurs extrêmes, ex. Venezuela 65 374 %)
+HIGH_INFL = 10  # seuil fixe des couleurs « inflation très élevée » (les alertes ont leurs propres curseurs)
 TARGET = 2   # cible d'inflation des banques centrales
 
 # Profils standardisés (mêmes attributs que le KMeans) pour trouver les pays les plus semblables
@@ -59,7 +60,8 @@ PROFILE_COLORS = dict(zip(PROFILES.profile[PROFILES.profile != "Données insuffi
 PROFILE_COLORS["Données insuffisantes"] = GRAY
 INCOME_COLORS = {"Revenu élevé": BLUE, "Revenu intermédiaire supérieur": ORANGE,
                  "Revenu intermédiaire inférieur": AQUA, "Faible revenu": YELLOW, "Non classé": GRAY}
-DIVERGING = [[0, BLUE], [0.5, "#383835"], [1, RED]]  # r : bleu = Phillips (r < 0), rouge = sens inverse
+DIVERGING = [[0, BLUE], [0.5, "#383835"], [1, RED]]
+PATH_COLORS = [BLUE, ORANGE, AQUA, YELLOW, "#d55181", "#9085e9", "#2f9e44", RED]  # une couleur fixe par pays choisi  # r : bleu = Phillips (r < 0), rouge = sens inverse
 
 # Couleurs d'état — toujours accompagnées d'une icône et d'un libellé
 STATUS = {  # niveau: (couleur, icône)
@@ -119,59 +121,58 @@ def trend(v, bad_if_up=True):
 
 # ================================================================ widgets
 # Filtres globaux (barre latérale)
-years = pn.widgets.IntRangeSlider(name="Période", start=1991, end=2021, value=(1991, 2021))
-measure = pn.widgets.RadioButtonGroup(name="Type d'inflation", options=list(MEASURES), value="Globale",
-                                      button_type="primary", button_style="outline")
-no_hyper = pn.widgets.Switch(value=True, width=40, sizing_mode="fixed", margin=(8, 10))
 region = pn.widgets.MultiChoice(name="Régions", options=sorted(PANEL.region.unique()), placeholder="Toutes")
 income = pn.widgets.MultiChoice(name="Groupes de revenu", options=list(INCOME_COLORS), placeholder="Tous")
-profile = pn.widgets.MultiChoice(name="Profils", options=list(PROFILE_COLORS), placeholder="Tous")
-infl_thr = pn.widgets.IntSlider(name="Inflation très élevée (%)", start=4, end=30, value=10)
-unemp_thr = pn.widgets.FloatSlider(name="Hausse du chômage (pts/an)", start=0, end=2, step=0.1, value=0.2)
+countries = pn.widgets.MultiChoice(name="Pays", options={n: iso for iso, n in NAMES.items()}, placeholder="Tous",
+                                   max_items=8)  # au-delà de 8, plus assez de couleurs distinctes pour les trajectoires
 reset = pn.widgets.Button(name="Réinitialiser", button_type="light", button_style="outline")
 
 # Filtres locaux (dans un onglet)
 TOGGLE = dict(button_type="primary", button_style="outline", sizing_mode="fixed")
-country = pn.widgets.Select(options={n: iso for iso, n in NAMES.items()}, value="CAN", width=260, sizing_mode="fixed")
-map_metric = pn.widgets.RadioButtonGroup(options=["Chômage", "Inflation", "Corrélation r", "Profil"],
-                                         value="Inflation", width=420, **TOGGLE)
-map_year = pn.widgets.Player(start=1991, end=2021, value=2021, interval=800, loop_policy="once",
-                             show_loop_controls=False, width=390, sizing_mode="fixed")
-color_by = pn.widgets.RadioButtonGroup(options=["Gris", "Profil", "Revenu"], value="Gris", width=210, **TOGGLE)
-detail = pn.widgets.RadioButtonGroup(options=["Pays × année", "Moyenne par pays"], value="Pays × année",
-                                     width=260, **TOGGLE)
-compare = pn.widgets.Checkbox(name="Médiane de la région", value=True, width=200, sizing_mode="fixed",
-                              margin=(12, 12))
+# Onglet Pays : boutons pour passer d'un pays choisi à l'autre (couleur = celle du pays dans « Le lien »)
+focus = pn.widgets.RadioButtonGroup(options={}, value=None, visible=False, button_type="primary", button_style="outline",
+                                    stylesheets=["".join(f".bk-btn:nth-child({k + 1}) {{ border-bottom:3px solid {c} !important }}"
+                                                         for k, c in enumerate(PATH_COLORS))])
+map_metric = pn.widgets.RadioButtonGroup(options=["Chômage", "Inflation"], value="Inflation", width=220, **TOGGLE)
+# Année affichée : une seule pour tout le tableau (indicateurs, carte, classement, alertes)
+year = pn.widgets.IntSlider(name="Année", start=int(PANEL.year.min()), end=int(PANEL.year.max()),
+                            value=int(PANEL.year.max()))
+# Seuils d'alerte : réglables dans l'onglet Alertes seulement
+infl_thr = pn.widgets.IntSlider(name="Alerte si inflation > (%)", start=4, end=30, value=10, width=240,
+                                sizing_mode="fixed")
+unemp_thr = pn.widgets.FloatSlider(name="et chômage en hausse de plus de (pts)", start=0, end=2, step=0.1, value=0.2,
+                                   width=260, sizing_mode="fixed")
 only_alerts = pn.widgets.Checkbox(name="Seulement les pays en alerte", value=True, width=240, sizing_mode="fixed",
                                   margin=(12, 12))
 
 
 def reset_filters(_):
-    years.value, measure.value, no_hyper.value = (1991, 2021), "Globale", True
-    region.value, income.value, profile.value = [], [], []
-    infl_thr.value, unemp_thr.value = 10, 0.2
+    region.value, income.value, countries.value = [], [], []
 
 
 reset.on_click(reset_filters)
 
 
-@pn.depends(years, watch=True)
-def sync_map_year(yrs):
-    map_year.param.update(start=yrs[0], end=yrs[1], value=min(max(map_year.value, yrs[0]), yrs[1]))
+@pn.depends(countries, watch=True)
+def follow_selection(chosen):
+    """L'onglet Pays suit le filtre Pays : un bouton par pays choisi, le dernier ajouté est affiché."""
+    keep = focus.value if focus.value in chosen else (chosen[-1] if chosen else None)
+    focus.param.update(options={NAMES[i]: i for i in chosen}, value=keep, visible=len(chosen) > 1)
+    country_charts.visible = bool(chosen)
 
 
 # ================================================================ calculs
-def prep(years, measure, no_hyper):
-    """Toutes les années/pays de la période, avec la mesure d'inflation choisie dans `infl`."""
-    d = PANEL[PANEL.year.between(*years)].copy()
-    if no_hyper:  # on masque la valeur (NaN) plutôt que de supprimer la ligne : le chômage reste visible
-        d[list(MEASURES.values())] = d[list(MEASURES.values())].mask(lambda x: x > HYPER)
-    d["infl"] = d[MEASURES[measure]]
+def prep():
+    """Toutes les années et tous les pays ; `infl` = inflation globale (alimentaire et énergie : fiche pays)."""
+    d = PANEL.copy()
+    # hyperinflation : on masque la valeur (NaN) plutôt que de supprimer la ligne, le chômage reste visible
+    d[list(MEASURES.values())] = d[list(MEASURES.values())].mask(lambda x: x > HYPER)
+    d["infl"] = d["inflation"]
     return d
 
 
-def apply_groups(d, region, income, profile):
-    for col, chosen in [("region", region), ("income_group", income), ("profile", profile)]:
+def apply_groups(d, region, income, countries):
+    for col, chosen in [("region", region), ("income_group", income), ("iso3", countries)]:
         if chosen:
             d = d[d[col].isin(chosen)]
     return d
@@ -192,10 +193,15 @@ ALERTS = ["Stagflation", "Inflation très élevée", "Chômage en hausse", "Aucu
 ALERT_LEVEL = dict(zip(ALERTS, ["bad", "bad", "warn", "good"]))
 
 
-def alerts(base, d, infl_thr, unemp_thr):
-    """Dernière année de la période : niveau d'alerte, variation du chômage, écart à la région."""
-    base = base.sort_values("year").assign(delta=lambda x: x.groupby("iso3").unemployment.diff())
-    last = base[base.year == base.year.max()].copy()
+LAST_YEAR = int(PANEL.year.max())
+
+
+def alerts(base, d, infl_thr, unemp_thr, year=LAST_YEAR):
+    """Alertes d'une année : niveau, variation du chômage, écart à la région, nombre d'années en stagflation."""
+    base = base.sort_values(["iso3", "year"]).assign(delta=lambda x: x.groupby("iso3").unemployment.diff())
+    history = ((base.infl > infl_thr) & (base.delta > unemp_thr)).groupby(base.iso3).sum()
+    last = base[base.year == year].copy()
+    last["n_stag"] = last.iso3.map(history)
     last["vs_region"] = last.infl - last.groupby("region").infl.transform("median")
     hot, rising = last.infl > infl_thr, last.delta > unemp_thr
     last["alert"] = pd.Categorical(np.select([hot & rising, hot, rising], ALERTS[:3], ALERTS[3]),
@@ -217,8 +223,8 @@ def peers(iso, n=3):
     return [NAMES[i] for i in dist.nsmallest(n).index]
 
 
-base = pn.bind(prep, years, measure, no_hyper)  # tous les pays (pays analysé, médianes régionales)
-data = pn.bind(apply_groups, base, region, income, profile)  # sélection filtrée
+BASE = prep()  # tous les pays : médianes régionales, alertes, fiches
+data = pn.bind(apply_groups, BASE, region, income, countries)  # sélection filtrée par la barre latérale
 
 # ================================================================ cartes KPI, mini-graphiques et phrases
 CSS = f"""
@@ -254,8 +260,8 @@ def html(obj, **kw):
     return pn.pane.HTML(obj, stylesheets=[CSS], **kw)
 
 
-def spark(values, color):
-    """Mini-courbe SVG (tendance sur la période)."""
+def spark(values, color, mark=None):
+    """Mini-courbe SVG sur 1991–2021 ; un trait vertical repère l'année affichée (`mark`)."""
     v = pd.Series(values).dropna()
     if len(v) < 2:
         return ""
@@ -263,10 +269,15 @@ def spark(values, color):
     xs = np.linspace(0, 100, len(v))
     ys = 31 - (v.values - lo) / ((hi - lo) or 1) * 28
     pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    marker = ""
+    if mark in v.index:
+        mx = xs[list(v.index).index(mark)]
+        marker = (f'<line x1="{mx:.1f}" x2="{mx:.1f}" y1="0" y2="34" stroke="{TEXT}" stroke-width="1.5" '
+                  f'opacity=".8" vector-effect="non-scaling-stroke"/>')
     return (f'<svg class="spark" viewBox="0 0 100 34" preserveAspectRatio="none">'
             f'<polygon points="0,34 {pts} 100,34" fill="{color}" opacity=".12"/>'
             f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6" '
-            f'vector-effect="non-scaling-stroke"/></svg>')
+            f'vector-effect="non-scaling-stroke"/>{marker}</svg>')
 
 
 def gauge(r):
@@ -299,43 +310,44 @@ def colored(v, level_fn):
     return f'<b style="color:{STATUS[level_fn(v)[0]][0]}">{num(v)}</b>'
 
 
-def legend_html(infl_thr):
-    rows = [("good", "chômage < 5 % · inflation 0–3 %"), ("warn", f"chômage 5–10 % · inflation 3–{infl_thr} %"),
-            ("bad", f"chômage ≥ 10 % · inflation > {infl_thr} %"), ("cold", "déflation (< 0 %)")]
+def legend_html():
+    rows = [("good", "chômage < 5 % · inflation 0–3 %"), ("warn", f"chômage 5–10 % · inflation 3–{HIGH_INFL} %"),
+            ("bad", f"chômage ≥ 10 % · inflation > {HIGH_INFL} %"), ("cold", "déflation (< 0 %)")]
     items = "".join(f'<div><b style="color:{STATUS[k][0]}">{STATUS[k][1]}</b>&nbsp; {t}</div>' for k, t in rows)
     return f'<div class="legend">{items}<div><b style="color:{BLUE}">●</b>&nbsp; r &lt; 0 : courbe de Phillips</div></div>'
 
 
-def kpis_html(d, base, measure, infl_thr, unemp_thr):
+def r_window(y):
+    """Fenêtre de 10 ans finissant en `y` (r se calcule sur une série d'années, pas sur une seule)."""
+    a = max(int(PANEL.year.min()), y - 9)
+    return a, a + 9
+
+
+def kpis_html(d, base, infl_thr, unemp_thr, y):
     if d.empty:
         return tip("Aucun pays ne correspond aux filtres.")
-    y0, y1 = d.year.min(), d.year.max()
     by_year = d.groupby("year")[["unemployment", "infl"]].median()
-    u0, u1 = by_year.unemployment.iloc[0], by_year.unemployment.iloc[-1]
-    i1 = by_year.infl.iloc[-1]
-    r = per_country_r(d)
-    stag = alerts(base, d, infl_thr, unemp_thr).query("alert == 'Stagflation'")
-    lu, li, ls = unemp_level(u1), infl_level(i1, infl_thr), ("bad" if len(stag) else "good")
+    u, i = by_year.unemployment.get(y, np.nan), by_year.infl.get(y, np.nan)
+    u_prev, i_prev = by_year.unemployment.get(y - 1, np.nan), by_year.infl.get(y - 1, np.nan)
+    vs_prev = (lambda v: f"{trend(v)} vs {y - 1}") if y - 1 in by_year.index else (lambda v: "première année")
+    a, b = r_window(y)
+    r = per_country_r(d[d.year.between(a, b)])
+    stag = alerts(base, d, infl_thr, unemp_thr, y).query("alert == 'Stagflation'")
+    lu, li, ls = unemp_level(u), infl_level(i, HIGH_INFL), ("bad" if len(stag) else "good")
     return '<div class="grid">' + "".join([
-        kpi(f"Chômage médian · {y1}", num(u1), *lu, f"{trend(u1 - u0)} depuis {y0}",
-            spark(by_year.unemployment, STATUS[lu[0]][0])),
-        kpi(f"Inflation {measure.lower()} · {y1}", num(i1), *li, f"cible {TARGET} %", spark(by_year.infl, STATUS[li[0]][0])),
-        kpi("Lien chômage–inflation", num(r.median(), "{:+.2f}", ""), "info", r_words(r.median()),
+        kpi(f"Chômage médian · {y}", num(u), *lu, vs_prev(u - u_prev), spark(by_year.unemployment, STATUS[lu[0]][0], y)),
+        kpi(f"Inflation · {y}", num(i), *li, f"{vs_prev(i - i_prev)} · cible {TARGET} %",
+            spark(by_year.infl, STATUS[li[0]][0], y)),
+        kpi(f"Lien chômage–inflation · {a}–{b}", num(r.median(), "{:+.2f}", ""), "info", r_words(r.median()),
             f"r &lt; 0 dans {(r < 0).sum()} pays sur {len(r)}", gauge(r.median())),
-        kpi(f"Stagflation · {y1}", f"{len(stag)} pays", ls, "À surveiller" if len(stag) else "Aucun",
+        kpi(f"Stagflation · {y}", f"{len(stag)} pays", ls, "À surveiller" if len(stag) else "Aucun",
             ", ".join(stag.country.head(2)) + ("…" if len(stag) > 2 else ""),
-            spark(stagflation_by_year(d, infl_thr, unemp_thr), STATUS[ls][0])),
+            spark(stagflation_by_year(d, infl_thr, unemp_thr), STATUS[ls][0], y)),
     ]) + "</div>"
 
 
-def world_tip(d, metric, year, infl_thr):
-    if metric == "Corrélation r":
-        r = per_country_r(d)
-        return tip(f"<b>{(r <= -0.5).sum()} pays</b> ont un lien de Phillips fort (r ≤ −0,5) ; le plus marqué : "
-                   f"<b>{NAMES[r.idxmin()]}</b> ({num(r.min(), '{:+.2f}', '')}).") if len(r) else ""
-    if metric == "Profil":
-        return tip("Les profils sont détaillés dans l'onglet <b>Profils</b>. Cliquez un pays pour ouvrir sa fiche.")
-    col, fn = ("unemployment", unemp_level) if metric == "Chômage" else ("infl", lambda v: infl_level(v, infl_thr))
+def world_tip(d, metric, year):
+    col, fn = ("unemployment", unemp_level) if metric == "Chômage" else ("infl", lambda v: infl_level(v, HIGH_INFL))
     m = d[d.year == year].dropna(subset=[col])
     if m.empty:
         return ""
@@ -344,64 +356,71 @@ def world_tip(d, metric, year, infl_thr):
                f"ou ▶ pour animer les années.")
 
 
+# Hauteurs de l'onglet « Le lien » : les deux cartes de droite (+ marges internes 24 px chacune, écart 14 px)
+# ont exactement la hauteur de la carte du nuage, pour que les bas de colonnes s'alignent.
+PHILLIPS_H = 620
+SIDE_H = (PHILLIPS_H + 24 - 14) // 2 - 24  # = 291 : 2 × (291 + 24) + 14 = 620 + 24
+
+SMALL = 10  # en dessous, une sélection est trop petite pour des statistiques sur la distribution des pays
+
+
+def decade_story(d):
+    """Décrit les trois décennies (pas seulement la première et la dernière)."""
+    dec = [(f"{a}–{b}", per_country_r(d[d.year.between(a, b)]).median()) for a, b in PERIODS]
+    dec = [(p, v) for p, v in dec if pd.notna(v)]
+    if len(dec) < 2:
+        return ""
+    values = " → ".join(f"{num(v, '{:+.2f}', '')} ({p})" for p, v in dec)
+    i = min(range(len(dec)), key=lambda k: dec[k][1])  # décennie où le lien de Phillips est le plus marqué
+    (p_best, best), (_, last) = dec[i], dec[-1]
+    if best >= -0.1:
+        verdict = "aucune décennie ne montre de lien net"
+    elif i < len(dec) - 1 and abs(last) < abs(best) / 2:
+        verdict = f"le lien est le plus marqué en {p_best}, puis s'affaiblit"
+    else:
+        verdict = f"le lien est le plus marqué en {p_best}"
+    return f" Par décennie : {values} ; {verdict}."
+
+
 def link_tip(d):
     dd = d.dropna(subset=["unemployment", "infl"])
     r_all = dd.unemployment.corr(dd.infl) if len(dd) > 2 else np.nan
     r = per_country_r(d)
-    dec = [per_country_r(d[d.year.between(a, b)]).median() for a, b in PERIODS]
-    dec = [x for x in dec if pd.notna(x)]
-    trend_txt = (f" Le lien s'affaiblit avec le temps ({num(dec[0], '{:+.2f}', '')} → {num(dec[-1], '{:+.2f}', '')})."
-                 if len(dec) > 1 and abs(dec[-1]) < abs(dec[0]) else "")
-    return tip(f"Tous pays confondus : <b>{r_words(r_all)}</b> (r = {num(r_all, '{:+.2f}', '')}). Pays par pays, "
+    strong = (r <= -0.5).sum()
+    warn = (f"<b style='color:{STATUS['warn'][0]}'>⚠ Seulement {len(r)} pays sélectionné{'s' if len(r) > 1 else ''} :"
+            f" à lire avec prudence.</b> " if len(r) < SMALL else "")
+    return tip(f"{warn}Tous pays confondus : <b>{r_words(r_all)}</b> (r = {num(r_all, '{:+.2f}', '')}). Pays par pays, "
                f"<b>{(r < 0).mean() * 100 if len(r) else 0:.0f} %</b> suivent la courbe de Phillips, "
-               f"mais seuls {(r <= -0.5).sum()} fortement.{trend_txt}")
+               f"{'dont ' + str(strong) + ' fortement' if strong else 'aucun fortement'}.{decade_story(d)}")
 
 
-def profiles_html(d, infl_thr):
+def profiles_html(d):
     p = PROFILES[PROFILES.iso3.isin(d.iso3)]
     g = p.groupby("profile").agg(n=("iso3", "size"), u=("unemp_median", "median"), i=("infl_median", "median"),
                                  r=("phillips_r", "median")).reindex(list(PROFILE_COLORS)).dropna(subset=["n"])
     rows = "".join(
         f'<tr><td><span class="chip" style="background:{PROFILE_COLORS[k]}"></span>{k}</td><td>{int(x.n)}</td>'
-        f'<td>{colored(x.u, unemp_level)}</td><td>{colored(x.i, lambda v: infl_level(v, infl_thr))}</td>'
+        f'<td>{colored(x.u, unemp_level)}</td><td>{colored(x.i, lambda v: infl_level(v, HIGH_INFL))}</td>'
         f'<td>{num(x.r, "{:+.2f}", "")}</td></tr>' for k, x in g.iterrows())
     return ('<table class="p"><tr><th>Profil · médianes 1991–2021</th><th>Pays</th><th>Chômage</th>'
             f'<th>Inflation</th><th>r</th></tr>{rows}</table>')
 
 
-def peers_tip(iso):
-    near = peers(iso)
-    return tip(f"Pays les plus semblables à <b>{NAMES[iso]}</b> : {', '.join(near)}.") if near else ""
+def peers_tip(chosen):
+    if not chosen:
+        return tip("Ajoutez des pays au filtre <b>Pays</b> pour voir leurs plus proches voisins de profil.")
+    lines = [f"<b>{NAMES[i]}</b> → {', '.join(peers(i))}" for i in chosen if peers(i)]
+    return tip("Pays les plus semblables : " + " · ".join(lines) + ".") if lines else ""
 
 
-def country_html(base, iso, infl_thr, unemp_thr):
-    c = base[base.iso3 == iso].sort_values("year")
-    if c.empty:
-        return tip("Pas de données pour ce pays sur la période.")
-    reg = base[base.region == c.region.iloc[0]]
-
-    def last(col):
-        s = c.dropna(subset=[col])
-        return (s[col].iloc[-1], s.year.iloc[-1]) if len(s) else (np.nan, c.year.max())
-
-    u, yu = last("unemployment")
-    i, yi = last("infl")
-    ru, ri = reg[reg.year == yu].unemployment.median(), reg[reg.year == yi].infl.median()
-    both = c.dropna(subset=["unemployment", "infl"])
-    r = both.unemployment.corr(both.infl) if len(both) >= 5 else np.nan
-    a = alerts(base, c, infl_thr, unemp_thr)
-    status = a.alert.iloc[0] if len(a) else "Aucune"
-    delta = a.delta.iloc[0] if len(a) else np.nan
-    lu, li, la = unemp_level(u), infl_level(i, infl_thr), ALERT_LEVEL[status]
-    return '<div class="grid">' + "".join([
-        kpi(f"Chômage · {yu}", num(u), *lu, f"{trend(u - ru)} vs région", spark(c.unemployment, STATUS[lu[0]][0])),
-        kpi(f"Inflation · {yi}", num(i), *li, f"{trend(i - ri)} vs région", spark(c.infl, STATUS[li[0]][0])),
-        kpi("Lien chômage–inflation", num(r, "{:+.2f}", ""), "info", r_words(r), "", gauge(r)),
-        kpi(f"Alerte · {c.year.max()}", f"{STATUS[la][1]} {status}", la, "", f"chômage sur 1 an : {trend(delta)}"),
-    ]) + "</div>"
+def country_empty(chosen):
+    return "" if chosen else tip("Aucun pays choisi. Ajoutez-en dans le filtre <b>Pays</b> de la barre latérale, ou cliquez "
+                                 "un pays sur la carte, dans le classement, un nuage ou le tableau d'alertes.")
 
 
 def country_sub(iso):
+    if iso not in NAMES.index:
+        return ""
     info = PANEL[PANEL.iso3 == iso].iloc[0]
     return f'<div class="sub">{info.region} · {info.income_group}</div>'
 
@@ -423,11 +442,13 @@ def category_tip(base, iso):
                f"({num(parts['Globale'], '{:+.1f}')}).")
 
 
-def alerts_tip(base, d, infl_thr, unemp_thr):
-    n = alerts(base, d, infl_thr, unemp_thr).alert.value_counts()
-    return tip(f"{base.year.max()} : <b style='color:{STATUS['bad'][0]}'>{n.get('Stagflation', 0)} pays en stagflation</b>"
+def alerts_tip(base, d, infl_thr, unemp_thr, year):
+    n = alerts(base, d, infl_thr, unemp_thr, year).alert.value_counts()
+    per_year = stagflation_by_year(d, infl_thr, unemp_thr)
+    peak = f" Pic : <b>{per_year.idxmax()}</b> ({per_year.max()} pays)." if len(per_year) and per_year.max() else ""
+    return tip(f"{year} : <b style='color:{STATUS['bad'][0]}'>{n.get('Stagflation', 0)} pays en stagflation</b>"
                f" (inflation > {infl_thr} % et chômage en hausse) · {n.get('Inflation très élevée', 0)} en inflation "
-               f"très élevée · {n.get('Chômage en hausse', 0)} avec chômage en hausse. Cliquez une ligne pour ouvrir la fiche.")
+               f"très élevée · {n.get('Chômage en hausse', 0)} avec chômage en hausse.{peak}")
 
 
 # ================================================================ figures
@@ -454,16 +475,16 @@ def band(fig, y0, y1, **kw):
     fig.add_hrect(y0=y0, y1=y1, fillcolor=STATUS["good"][0], opacity=0.09, line_width=0, **kw)
 
 
-def level_frame(m, col, infl_thr):
+def level_frame(m, col):
     """Ajoute le libellé de niveau (Faible/Modéré/…) ; renvoie aussi l'ordre et les couleurs des niveaux."""
-    fn = unemp_level if col == "unemployment" else (lambda v: infl_level(v, infl_thr))
-    reps = [1, 7, 12] if col == "unemployment" else [-1, 1, 4, infl_thr + 1]
+    fn = unemp_level if col == "unemployment" else (lambda v: infl_level(v, HIGH_INFL))
+    reps = [1, 7, 12] if col == "unemployment" else [-1, 1, 4, HIGH_INFL + 1]
     order = [fn(v)[1] for v in reps]
     colors = {fn(v)[1]: STATUS[fn(v)[0]][0] for v in reps}
     return m.assign(level=m[col].map(lambda v: fn(v)[1])), order, colors
 
 
-def map_fig(d, metric, year, iso, infl_thr):
+def map_fig(d, metric, year):
     if d.empty:
         return empty()
     hover = dict(hover_name="country", locations="iso3")
@@ -471,40 +492,33 @@ def map_fig(d, metric, year, iso, infl_thr):
         m = per_country_r(d).rename("r").reset_index().merge(PROFILES[["iso3", "country"]])
         fig = px.choropleth(m, color="r", color_continuous_scale=DIVERGING, range_color=(-1, 1), **hover)
         fig.update_layout(coloraxis_colorbar=dict(thickness=10, len=0.6, outlinewidth=0))
-        title = f"Lien chômage–inflation (r) · {d.year.min()}–{d.year.max()}"
-    elif metric == "Profil":
-        fig = px.choropleth(d.drop_duplicates("iso3"), color="profile", color_discrete_map=PROFILE_COLORS,
-                            category_orders={"profile": list(PROFILE_COLORS)}, **hover)
-        title = "Profils de pays"
+        title = f"r par pays · {d.year.min()}–{d.year.max()} · bleu = Phillips, rouge = inverse"
     else:
         col = "unemployment" if metric == "Chômage" else "infl"
-        m, order, colors = level_frame(d[d.year == year].dropna(subset=[col]), col, infl_thr)
+        m, order, colors = level_frame(d[d.year == year].dropna(subset=[col]), col)
         fig = px.choropleth(m, color="level", color_discrete_map=colors, category_orders={"level": order},
                             hover_data={col: ":.1f", "level": False, "iso3": False},
                             labels={col: f"{metric} (%)"}, **hover)
         title = f"{metric} · {year}"
     fig.update_traces(marker_line_color=BG, marker_line_width=0.4, marker_opacity=0.85)  # moins criard sur fond sombre
-    if iso in set(d.iso3):  # contour du pays analysé
-        fig.add_choropleth(locations=[iso], z=[0], showscale=False, hoverinfo="skip", marker_line_width=1.8,
-                           marker_line_color=TEXT, colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]])
     fig.update_geos(showframe=False, projection_type="natural earth", bgcolor="rgba(0,0,0,0)", showland=True,
                     landcolor=SURFACE2, showcountries=False, showcoastlines=False, showlakes=False)
     return style(fig, title, 480).update_layout(legend=dict(y=0.02, yanchor="bottom"))
 
 
-def ranking_fig(d, metric, year, infl_thr):
+def ranking_fig(d, metric, year):
     if d.empty:
         return empty()
     if metric in ("Chômage", "Inflation"):
         col = "unemployment" if metric == "Chômage" else "infl"
-        m, order, colors = level_frame(d[d.year == year].dropna(subset=[col]).nlargest(10, col), col, infl_thr)
+        m, order, colors = level_frame(d[d.year == year].dropna(subset=[col]).nlargest(10, col), col)
         if m.empty:
             return empty()
         fig = px.bar(m, x=col, y="country", orientation="h", color="level", color_discrete_map=colors,
                      category_orders={"level": order}, custom_data=["iso3"], text=m[col].map(num),
                      labels={col: "%", "country": ""})
         title, ys = f"Top 10 · {year}", list(m.country)
-    elif metric == "Corrélation r":
+    else:
         r = per_country_r(d).nsmallest(10).rename("r").reset_index()
         if r.empty:
             return empty()
@@ -512,65 +526,126 @@ def ranking_fig(d, metric, year, infl_thr):
         fig = px.bar(r, x="r", y="country", orientation="h", custom_data=["iso3"], color_discrete_sequence=[BLUE],
                      text=r.r.map(lambda v: num(v, "{:+.2f}", "")), labels={"country": ""})
         title, ys = "Liens de Phillips les plus forts", list(r.country)
-    else:
-        cnt = d.drop_duplicates("iso3").profile.value_counts().reset_index()
-        fig = px.bar(cnt, x="count", y="profile", orientation="h", color="profile", color_discrete_map=PROFILE_COLORS,
-                     text="count", labels={"count": "Pays", "profile": ""})
-        title, ys = "Pays par profil", list(cnt.profile)
     fig.update_yaxes(categoryorder="array", categoryarray=ys, autorange="reversed", showgrid=False)
     xs = np.concatenate([t.x for t in fig.data])
     fig.update_xaxes(range=[min(min(xs), 0) * 1.3, max(max(xs), 0) * 1.25], showgrid=False, visible=False)
     fig.update_traces(textposition="outside", cliponaxis=False, textfont_color=TEXT2, marker_cornerradius=4)
+    if metric == "Corrélation r":  # barres négatives : l'étiquette dehors chevaucherait le nom du pays
+        fig.update_traces(textposition="inside", insidetextanchor="start", textfont_color=TEXT)
     return style(fig, title, 480).update_layout(showlegend=False, bargap=0.35)
 
 
-def phillips_fig(d, base, iso, color_by, detail):
+def trend_line(fig, x, y, name, legend=True, x_span=None, **line):
+    """Droite des moindres carrés (tracée sur x_span, sinon l'étendue des x) ; la légende porte le r."""
+    slope, intercept = np.polyfit(x, y, 1)
+    xs = np.array(x_span if x_span is not None else [x.min(), x.max()])
+    fig.add_scatter(x=xs, y=slope * xs + intercept, mode="lines", hoverinfo="skip", line=line, showlegend=legend,
+                    name=f"{name} (r = {num(x.corr(y), '{:+.2f}', '')})")
+
+
+def hidden_note(iso):
+    raw = PANEL.loc[PANEL.iso3 == iso, "inflation"]
+    n = int((raw > HYPER).sum())
+    return f" · {n} an{'s' if n > 1 else ''} masqué{'s' if n > 1 else ''} (> {HYPER} %)" if n else ""
+
+
+DECADE_COLORS = [BLUE, ORANGE, AQUA]  # 1991–2000, 2001–2010, 2011–2021
+
+
+def add_dots(fig, c, iso, color, name):
+    """Un point par année, sans trait (30 années reliées deviennent illisibles) ; l'année s'affiche au survol."""
+    fig.add_scatter(x=c.unemployment, y=c.infl, mode="markers", name=name, customdata=[[iso, y] for y in c.year],
+                    marker=dict(size=10, color=color, opacity=0.9, line=dict(color=BG, width=1)),
+                    hovertemplate=f"<b>{NAMES[iso]}</b> %{{customdata[1]}}<br>chômage %{{x:.1f}} %"
+                                  "<br>inflation %{y:.1f} %<extra></extra>")
+
+
+def corner_badge(fig, text):
+    fig.add_annotation(xref="paper", yref="paper", x=1, y=1, xanchor="right", yanchor="top", showarrow=False,
+                       align="right", font=dict(size=13, color=TEXT), bgcolor=SURFACE2, bordercolor=BORDER,
+                       borderpad=8, text=text)
+
+
+def subtitle(text):
+    return f"Chômage vs inflation<br><span style='font-size:12px;color:{TEXT3}'>{text}</span>"
+
+
+def phillips_fig(d, base, chosen):
     d = d.dropna(subset=["unemployment", "infl"])
     if len(d) < 3:
         return empty()
-    col = {"Gris": None, "Profil": "profile", "Revenu": "income_group"}[color_by]
-    keys = ["iso3", "country"] + ([col] if col else [])
-    pts = d.groupby(keys, as_index=False)[["unemployment", "infl"]].mean() if detail == "Moyenne par pays" else d
-    colors = PROFILE_COLORS if col == "profile" else INCOME_COLORS
-    fig = px.scatter(pts, x="unemployment", y="infl", color=col, hover_name="country", custom_data=["iso3"],
-                     render_mode="svg",  # sinon WebGL dessine le nuage par-dessus la trajectoire du pays
-                     color_discrete_map=colors if col else None, color_discrete_sequence=[GRAY],
-                     category_orders={col: list(colors)} if col else None,
-                     hover_data={"year": True} if detail == "Pays × année" else None,
-                     opacity=0.35 if detail == "Pays × année" else 0.8,
-                     labels={"unemployment": "Chômage (%)", "infl": "Inflation (%)", "year": "Année",
-                             "profile": "Profil", "income_group": "Revenu"})
-    fig.update_traces(marker=dict(size=5 if detail == "Pays × année" else 8, line_width=0))
-    slope, intercept = np.polyfit(pts.unemployment, pts.infl, 1)
-    xs = np.array([pts.unemployment.min(), pts.unemployment.max()])
-    fig.add_scatter(x=xs, y=slope * xs + intercept, mode="lines", name="Tendance",
-                    line=dict(color=TEXT3, dash="dash", width=1.5), hoverinfo="skip")
-    c = base[base.iso3 == iso].dropna(subset=["unemployment", "infl"])
-    if len(c):  # trajectoire du pays analysé
-        labels = [str(y) if y in (c.year.min(), c.year.max()) else "" for y in c.year]
-        fig.add_scatter(x=c.unemployment, y=c.infl, mode="lines+markers+text", text=labels,
-                        textposition="top center", textfont_color=TEXT, name=NAMES[iso], customdata=[[iso]] * len(c),
-                        line=dict(color=TEXT, width=2.5), marker=dict(size=7, color=TEXT, line=dict(color=BG, width=1.5)))
+    if chosen:
+        fig = px.scatter()
+        if len(chosen) == 1:  # un pays : une couleur par décennie, pour voir si le lien change avec le temps
+            iso = chosen[0]
+            c = d[d.iso3 == iso]
+            for (a, b), color in zip(PERIODS, DECADE_COLORS):
+                part = c[c.year.between(a, b)]
+                if part.empty:
+                    continue
+                ok = len(part) >= 5
+                add_dots(fig, part, iso, color,
+                         f"{a}–{b}" + (f" (r = {num(part.unemployment.corr(part.infl), '{:+.2f}', '')})" if ok else ""))
+                if ok:
+                    trend_line(fig, part.unemployment, part.infl, "", legend=False, color=color, width=2.5)
+            r = c.unemployment.corr(c.infl) if len(c) >= 5 else np.nan
+            note = hidden_note(iso).replace(" · ", "")
+            corner_badge(fig, f"<b>{NAMES[iso]}</b> · r = {num(r, '{:+.2f}', '')}<br>{r_words(r)}"
+                              + (f"<br><span style='font-size:11px;color:{TEXT3}'>{note}</span>" if note else ""))
+            sub = "Un point par année · couleur = décennie · pente ↘ = courbe de Phillips"
+        else:  # plusieurs pays : une couleur par pays, une droite de tendance chacun
+            for k, iso in enumerate(chosen):
+                c = d[d.iso3 == iso]
+                if c.empty:
+                    continue
+                color, ok = PATH_COLORS[k % len(PATH_COLORS)], len(c) >= 5
+                add_dots(fig, c, iso, color,
+                         NAMES[iso] + (f" (r = {num(c.unemployment.corr(c.infl), '{:+.2f}', '')})" if ok else ""))
+                if ok:
+                    trend_line(fig, c.unemployment, c.infl, "", legend=False, color=color, width=2.5)
+            sub = "Un point par année · couleur = pays · pente ↘ = courbe de Phillips"
+        fig.update_xaxes(title_text="Chômage (%)")
+        fig.update_yaxes(title_text="Inflation (%)")
+        return style(fig, subtitle(sub), PHILLIPS_H).update_layout(uirevision="|".join(chosen), margin_t=70)
+    pts = d.groupby(["iso3", "country"], as_index=False)[["unemployment", "infl"]].mean()  # un point par pays
+    fig = px.scatter(pts, x="unemployment", y="infl", hover_name="country", custom_data=["iso3"], opacity=0.8,
+                     color_discrete_sequence=[GRAY], labels={"unemployment": "Chômage (%)", "infl": "Inflation (%)"})
+    fig.update_traces(marker=dict(size=8, line_width=0))
+    world = base.dropna(subset=["unemployment", "infl"])
+    trend_line(fig, world.unemployment, world.infl, "Tendance mondiale", x_span=[pts.unemployment.min(),
+               pts.unemployment.max()], color=TEXT3, dash="dash", width=1.5)
     lo, hi = pts.infl.quantile([0.01, 0.99])  # on coupe les 1 % extrêmes pour que le nuage reste lisible
-    fig.update_yaxes(range=[min(lo, c.infl.min() if len(c) else lo) - 2, max(hi, c.infl.max() if len(c) else hi) + 2])
-    return style(fig, "Chômage vs inflation", 600)
+    fig.update_yaxes(range=[lo - 2, hi + 2])
+    sub = "Un point par pays (moyenne 1991–2021) · pente ↘ = courbe de Phillips · cliquez un point pour le détailler"
+    # uirevision change avec la vue : Plotly réinitialise alors zoom et axes au lieu de garder ceux de la vue précédente
+    return style(fig, subtitle(sub), PHILLIPS_H).update_layout(uirevision="tous", margin_t=70)
 
 
-def r_hist_fig(d, iso):
+def r_hist_fig(d, chosen):
     r = per_country_r(d)
     if r.empty:
         return empty()
+    if len(r) < SMALL:  # trop peu de pays pour un histogramme : une barre par pays, triée
+        df = r.sort_values().rename("r").reset_index()
+        df["country"] = df.iso3.map(NAMES)
+        # même couleur par pays que les trajectoires du nuage quand des pays sont choisis
+        colors = [PATH_COLORS[list(chosen).index(i) % len(PATH_COLORS)] if i in chosen
+                  else (BLUE if v < 0 else GRAY) for i, v in zip(df.iso3, df.r)]
+        fig = px.bar(df, x="r", y="country", orientation="h", text=df.r.map(lambda v: num(v, "{:+.2f}", "")),
+                     labels={"r": "r", "country": ""})
+        fig.update_traces(marker_color=colors, marker_line_width=0, textposition="outside", cliponaxis=False,
+                          textfont_color=TEXT2, marker_cornerradius=3)
+        fig.update_xaxes(range=[-1, 1], zeroline=True)
+        fig.update_yaxes(categoryorder="array", categoryarray=list(df.country), autorange="reversed")
+        return style(fig, f"r par pays · {len(r)} pays", SIDE_H).update_layout(bargap=0.35)
     df = r.rename("r").reset_index()
     df["sign"] = np.where(df.r < 0, "r < 0", "r ≥ 0")
     fig = px.histogram(df, x="r", color="sign", nbins=20, range_x=(-1, 1),
                        color_discrete_map={"r < 0": BLUE, "r ≥ 0": GRAY}, labels={"r": "r", "sign": ""})
     fig.add_vline(x=r.median(), line=dict(color=TEXT3, dash="dot"))
-    if iso in r.index:
-        fig.add_vline(x=r[iso], line=dict(color=TEXT, width=2), annotation_text=NAMES[iso],
-                      annotation_position="top right", annotation_font_color=TEXT)
     fig.update_traces(marker_line_width=0)
     fig.update_layout(yaxis_title="Pays", bargap=0.12, showlegend=False)
-    return style(fig, f"Un r par pays · {len(r)} pays", 290)
+    return style(fig, f"Un r par pays · {len(r)} pays", SIDE_H)
 
 
 def decade_fig(d):
@@ -584,10 +659,10 @@ def decade_fig(d):
                       marker_cornerradius=4)
     pad = max(0.05, df.r.abs().max() * 0.4)  # marge pour que les petites barres restent visibles
     fig.update_yaxes(range=[min(df.r.min(), 0) - pad, max(df.r.max(), 0) + pad])
-    return style(fig, "r médian par décennie", 290)
+    return style(fig, "r médian par décennie", SIDE_H)
 
 
-def profile_fig(d, iso):
+def profile_fig(d):
     p = PROFILES[PROFILES.iso3.isin(d.iso3) & (PROFILES.infl_median > 0)]
     if p.empty:
         return empty()
@@ -599,29 +674,23 @@ def profile_fig(d, iso):
     fig.update_traces(marker=dict(size=10, line=dict(color=BG, width=1)))
     fig.add_vrect(x0=0, x1=5, fillcolor=STATUS["good"][0], opacity=0.07, line_width=0)  # zones saines
     band(fig, 0.5, 3)  # (unités de données, même en échelle log)
-    sel = p[p.iso3 == iso]
-    if len(sel):
-        fig.add_scatter(x=sel.unemp_median, y=sel.infl_median, mode="markers+text", text=sel.country,
-                        textposition="top center", textfont_color=TEXT, showlegend=False, hoverinfo="skip",
-                        marker=dict(size=17, color="rgba(0,0,0,0)", line=dict(color=TEXT, width=2)))
     return style(fig, "Un point par pays", 520).update_layout(showlegend=False)
 
 
-def country_fig(base, iso, measure, compare, infl_thr):
+def country_fig(base, iso):
     c = base[base.iso3 == iso]
     if c.empty:
-        return empty()
+        return empty("")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07)
     band(fig, 0, 5, row=1, col=1)
     band(fig, 0, 3, row=2, col=1)
-    fig.add_hline(y=infl_thr, line=dict(color=STATUS["bad"][0], dash="dash", width=1), row=2, col=1)
+    fig.add_hline(y=HIGH_INFL, line=dict(color=STATUS["bad"][0], dash="dash", width=1), row=2, col=1)
     fig.add_scatter(x=c.year, y=c.unemployment, name=NAMES[iso], line=dict(color=TEXT, width=2.5), row=1, col=1)
     fig.add_scatter(x=c.year, y=c.infl, line=dict(color=TEXT, width=2.5), showlegend=False, row=2, col=1)
-    if compare:
-        reg = base[base.region == c.region.iloc[0]].groupby("year")[["unemployment", "infl"]].median()
-        line = dict(color=BLUE, width=2, dash="dot")
-        fig.add_scatter(x=reg.index, y=reg.unemployment, name="Médiane de la région", line=line, row=1, col=1)
-        fig.add_scatter(x=reg.index, y=reg.infl, line=line, showlegend=False, row=2, col=1)
+    reg = base[base.region == c.region.iloc[0]].groupby("year")[["unemployment", "infl"]].median()
+    line = dict(color=BLUE, width=2, dash="dot")
+    fig.add_scatter(x=reg.index, y=reg.unemployment, name="Médiane de la région", line=line, row=1, col=1)
+    fig.add_scatter(x=reg.index, y=reg.infl, line=line, showlegend=False, row=2, col=1)
     for y, label in SHOCKS.items():
         if c.year.min() <= y <= c.year.max():
             fig.add_vline(x=y, line=dict(color=BORDER, width=1.5))
@@ -630,12 +699,14 @@ def country_fig(base, iso, measure, compare, infl_thr):
     fig.update_layout(hovermode="x unified")
     fig.update_yaxes(rangemode="tozero")  # la bande verte (zone saine) reste visible
     fig.update_yaxes(title_text="Chômage (%)", row=1, col=1)
-    fig.update_yaxes(title_text=f"Inflation {measure.lower()} (%)", row=2, col=1)
+    fig.update_yaxes(title_text="Inflation (%)", row=2, col=1)
     return style(fig, "", 520).update_layout(margin_t=36, legend=dict(y=-0.07))
 
 
-def category_fig(base, iso, infl_thr):
+def category_fig(base, iso):
     c = base[base.iso3 == iso]
+    if c.empty:
+        return empty("")
     c = c[c.year > c.year.max() - 10]  # 10 dernières années : lisible
     long = c.melt(id_vars="year", value_vars=list(MEASURES.values()), var_name="serie", value_name="val").dropna()
     if long.empty:
@@ -644,21 +715,37 @@ def category_fig(base, iso, infl_thr):
     fig = px.bar(long, x="year", y="val", color="serie", barmode="group", color_discrete_map=SERIES_COLORS,
                  category_orders={"serie": list(MEASURES)}, labels={"year": "", "val": "Inflation (%)"})
     band(fig, 0, 3)
-    fig.add_hline(y=infl_thr, line=dict(color=STATUS["bad"][0], dash="dash", width=1))
+    fig.add_hline(y=HIGH_INFL, line=dict(color=STATUS["bad"][0], dash="dash", width=1))
     fig.update_traces(marker_line_width=0, marker_cornerradius=2)
     fig.update_layout(bargap=0.25, bargroupgap=0.08)
     return style(fig, "Inflation par catégorie", 470).update_layout(legend=dict(y=-0.08))
 
 
+def stag_fig(d, infl_thr, unemp_thr, year):
+    """Nombre de pays en stagflation chaque année ; l'année affichée dans le tableau est mise en évidence."""
+    s = stagflation_by_year(d, infl_thr, unemp_thr)
+    if s.empty:
+        return empty()
+    fig = px.bar(x=s.index, y=s.values, labels={"x": "", "y": "Pays en stagflation"})
+    fig.update_traces(marker_color=[STATUS["bad"][0] if y == year else "#5b2e30" for y in s.index],
+                      marker_line_width=0, marker_cornerradius=3,
+                      hovertemplate="%{x} : %{y} pays<extra></extra>")
+    for y, label in SHOCKS.items():
+        fig.add_annotation(x=y, y=s.max(), text=label, showarrow=False, yshift=16, font=dict(size=10, color=TEXT3))
+    return style(fig, f"Pays en stagflation chaque année · cliquez une barre pour voir l'année", 260).update_layout(
+        bargap=0.25, margin_t=60)
+
+
 # ================================================================ tableau d'alertes
-def alert_view(base, d, infl_thr, unemp_thr, only):
-    a = alerts(base, d, infl_thr, unemp_thr)
+def alert_view(base, d, infl_thr, unemp_thr, only, year):
+    a = alerts(base, d, infl_thr, unemp_thr, year)
     if only:
         a = a[a.alert != "Aucune"]
     a = a.assign(alert=a.alert.astype(str).map(lambda s: f"{STATUS[ALERT_LEVEL[s]][1]} {s}"))
-    return a[["iso3", "alert", "country", "region", "infl", "unemployment", "delta", "vs_region"]].rename(columns={
+    return a[["iso3", "alert", "country", "region", "infl", "unemployment", "delta", "vs_region", "n_stag"]].rename(columns={
         "alert": "Alerte", "country": "Pays", "region": "Région", "infl": "Inflation (%)",
-        "unemployment": "Chômage (%)", "delta": "Δ chômage 1 an", "vs_region": "Écart région"}
+        "unemployment": "Chômage (%)", "delta": "Δ chômage 1 an", "vs_region": "Écart région",
+        "n_stag": "Années en stagflation"}
     ).round(2).reset_index(drop=True)
 
 
@@ -666,7 +753,7 @@ def cell_colors(df):
     """Couleur de texte selon le niveau de chaque valeur (mêmes repères que le reste du tableau de bord)."""
     out = pd.DataFrame("", index=df.index, columns=df.columns)
     text = lambda lvl: f"color: {STATUS[lvl][0]}; font-weight: 600"
-    out["Inflation (%)"] = df["Inflation (%)"].map(lambda v: text(infl_level(v, infl_thr.value)[0]))
+    out["Inflation (%)"] = df["Inflation (%)"].map(lambda v: text(infl_level(v, HIGH_INFL)[0]))
     out["Chômage (%)"] = df["Chômage (%)"].map(lambda v: text(unemp_level(v)[0]))
     out["Δ chômage 1 an"] = df["Δ chômage 1 an"].map(
         lambda v: text("bad" if v > unemp_thr.value else "good" if v < 0 else "neutral") if pd.notna(v) else "")
@@ -685,7 +772,7 @@ TABLE_CSS = f"""
 .tabulator .tabulator-footer {{ background:{SURFACE}; border-top:1px solid {BORDER}; color:{TEXT3} }}
 .tabulator .tabulator-header-filter input {{ background:{SURFACE2}; color:{TEXT}; border:1px solid {BORDER}; border-radius:6px }}
 """
-table = pn.widgets.Tabulator(pn.bind(alert_view, base, data, infl_thr, unemp_thr, only_alerts),
+table = pn.widgets.Tabulator(pn.bind(alert_view, BASE, data, infl_thr, unemp_thr, only_alerts, year),
                              hidden_columns=["iso3"], show_index=False, disabled=True, pagination="local",
                              page_size=15, layout="fit_data_stretch", header_filters={"Pays": {"type": "input"}},
                              widths={"Alerte": 200}, theme="simple", stylesheets=[TABLE_CSS])
@@ -699,15 +786,23 @@ TAB_COUNTRY = 3  # index de l'onglet « Pays »
 
 
 def select_country(iso, open_tab=False):
-    if iso in NAMES.index:
-        country.value = iso
-        if open_tab:  # exploration -> détail : on ouvre la fiche du pays
-            tabs.active = TAB_COUNTRY
+    """Un clic sur un pays l'ajoute au filtre Pays (un seul concept de « pays choisis » dans tout le tableau)."""
+    if iso not in NAMES.index:
+        return
+    if iso not in countries.value:
+        if len(countries.value) >= countries.max_items:
+            return
+        countries.value = countries.value + [iso]
+    focus.value = iso
+    if open_tab:  # exploration -> détail : on ouvre la fiche du pays
+        tabs.active = TAB_COUNTRY
 
 
-def plot(fig_fn, *args, open_tab=None):
-    """Graphique Plotly réactif. open_tab=False : un clic surligne le pays ; True : ouvre aussi l'onglet Pays."""
-    pane = pn.pane.Plotly(pn.bind(fig_fn, *args), config={"displaylogo": False, "displayModeBar": "hover"})
+def plot(fig_fn, *args, open_tab=None, height=None):
+    """Graphique Plotly réactif. open_tab=False : un clic ajoute le pays au filtre ; True : ouvre aussi sa fiche."""
+    # height = celle de la figure : sinon Panel réserve une hauteur par défaut et laisse un vide sous le graphique
+    pane = pn.pane.Plotly(pn.bind(fig_fn, *args), height=height,
+                          config={"displaylogo": False, "displayModeBar": "hover"})
     if open_tab is not None:
         pane.param.watch(lambda e: [select_country(p.get("location") or (p.get("customdata") or [None])[0], open_tab)
                                     for p in ((e.new or {}).get("points") or [])[:1]], "click_data")
@@ -728,33 +823,45 @@ def row(*objects):  # passe à la ligne si l'écran est étroit
 table.on_click(lambda e: select_country(table.value.iloc[e.row]["iso3"], open_tab=True))
 
 world = pn.Column(
-    row(map_metric, map_year),
-    row(box(plot(map_fig, data, map_metric, map_year, country, infl_thr, open_tab=True), flex="2 1 560px"),
-        box(plot(ranking_fig, data, map_metric, map_year, infl_thr, open_tab=True), flex="1 1 300px")),
-    html(pn.bind(world_tip, data, map_metric, map_year, infl_thr), margin=(4, 7)),
+    row(map_metric),
+    row(box(plot(map_fig, data, map_metric, year, open_tab=True), flex="2 1 560px"),
+        box(plot(ranking_fig, data, map_metric, year, open_tab=True), flex="1 1 300px")),
+    html(pn.bind(world_tip, data, map_metric, year), margin=(4, 7)),
 )
 link = pn.Column(
     html(pn.bind(link_tip, data), margin=(4, 7)),
-    row(box(row(color_by, detail), plot(phillips_fig, data, base, country, color_by, detail, open_tab=False),
-            flex="3 1 520px"),
-        pn.Column(box(plot(r_hist_fig, data, country)), box(plot(decade_fig, data)),
+    row(box(plot(phillips_fig, data, BASE, countries, open_tab=False, height=PHILLIPS_H), flex="3 1 520px"),
+        # flex « 0 0 auto » : empilées, les cartes ne doivent pas prendre la base de 400 px (prévue pour la largeur)
+        pn.Column(box(plot(r_hist_fig, data, countries, height=SIDE_H), flex="0 0 auto"),
+                  box(plot(decade_fig, data, height=SIDE_H), flex="0 0 auto"),
                   styles={"flex": "2 1 300px"}, min_width=260)),
+    # carte du r (toute la période, comme le reste de cet onglet) : un clic ajoute le pays au filtre Pays
+    row(box(plot(map_fig, data, "Corrélation r", LAST_YEAR, open_tab=False), flex="2 1 560px"),
+        box(plot(ranking_fig, data, "Corrélation r", LAST_YEAR, open_tab=False), flex="1 1 300px")),
 )
 profiles = pn.Column(
-    html(pn.bind(peers_tip, country), margin=(4, 7)),
-    row(box(plot(profile_fig, data, country, open_tab=False), flex="3 1 520px"),
-        box(html(pn.bind(profiles_html, data, infl_thr), margin=(10, 14)), flex="2 1 340px")),
+    html(pn.bind(peers_tip, countries), margin=(4, 7)),
+    row(box(plot(profile_fig, data), flex="3 1 520px"),
+        box(html(pn.bind(profiles_html, data), margin=(10, 14)), flex="2 1 340px")),
 )
+country_charts = row(box(plot(country_fig, BASE, focus), flex="3 1 520px"),
+                     box(plot(category_fig, BASE, focus), html(pn.bind(category_tip, BASE, focus), margin=(0, 10, 10, 10)),
+                         flex="2 1 340px"))
+country_charts.visible = False
 country_tab = pn.Column(
-    pn.Row(country, html(pn.bind(country_sub, country))),
-    html(pn.bind(country_html, base, country, infl_thr, unemp_thr), margin=(4, 7)),
-    row(box(compare, plot(country_fig, base, country, measure, compare, infl_thr), flex="3 1 520px"),
-        box(plot(category_fig, base, country, infl_thr), html(pn.bind(category_tip, base, country), margin=(0, 10, 10, 10)),
-            flex="2 1 340px")),
+    pn.Row(focus, html(pn.bind(country_sub, focus))),
+    html(pn.bind(country_empty, countries), margin=(4, 7)),
+    country_charts,
 )
+stag_pane = pn.pane.Plotly(pn.bind(stag_fig, data, infl_thr, unemp_thr, year),
+                           config={"displaylogo": False, "displayModeBar": False})
+stag_pane.param.watch(lambda e: [setattr(year, "value", int(p["x"]))
+                                 for p in ((e.new or {}).get("points") or [])[:1]], "click_data")
 alerts_tab = pn.Column(
-    html(pn.bind(alerts_tip, base, data, infl_thr, unemp_thr), margin=(4, 7)),
-    pn.Row(only_alerts, pn.Spacer(), download),
+    html(pn.bind(alerts_tip, BASE, data, infl_thr, unemp_thr, year), margin=(4, 7)),
+    pn.FlexBox(infl_thr, unemp_thr, align_items="center"),
+    box(stag_pane, flex="1 1 100%"),
+    pn.FlexBox(only_alerts, pn.Spacer(), download, align_items="center"),
     box(table, flex="1 1 100%"),
 )
 
@@ -776,25 +883,66 @@ GUIDE = f"""
 **Onglets** — *Monde* : situation par pays et classement · *Le lien* : la relation chômage–inflation, tous pays,
 pays par pays, par décennie · *Profils* : pays semblables (KMeans) · *Pays* : fiche détaillée · *Alertes* : pays à surveiller.
 
-**Interactions** — barre latérale = filtres pour tout le tableau. Cliquez un pays (carte, classement, tableau)
-pour ouvrir sa fiche ; dans les nuages de points, un clic le surligne. Survol = valeurs, glisser = zoom, double-clic = retour.
+**Interactions** — les filtres de la barre latérale (régions, revenu, pays) s'appliquent à **tous** les onglets.
+Cliquer un pays (carte, classement, nuage, tableau) l'ajoute au filtre Pays : *Le lien* montre alors sa trajectoire et
+l'onglet *Pays* sa fiche. Retirez-le avec ✕ au-dessus des onglets. Les seuils d'alerte se règlent dans *Alertes*.
+L'**année affichée** (barre latérale) règle les indicateurs, la carte, le classement et les alertes ; le lien chômage–inflation y est calculé sur les 10 ans qui finissent cette année-là.
+Survol = valeurs, glisser = zoom, double-clic = retour. Période analysée : 1991–2021 ; inflation globale (alimentaire et
+énergie dans la fiche pays).
 
 **Repères** — chômage : ✓ < 5 % · ! 5–10 % · ⚠ ≥ 10 %. Inflation : ✓ 0–3 % (cible des banques centrales : {TARGET} %)
-· ! 3 % au seuil · ⚠ au-delà du seuil · ↓ déflation. ▲▼ rouge = évolution dans le mauvais sens.
+· ! 3–{HIGH_INFL} % · ⚠ au-delà de {HIGH_INFL} % · ↓ déflation. ▲▼ rouge = évolution dans le mauvais sens.
 r (bleu) entre −1 et 1 : r < 0 = chômage ↑, inflation ↓. |r| < 0,1 aucun lien ; < 0,3 faible ; < 0,5 modéré ; sinon fort.
 Corrélation ≠ causalité. *Stagflation* : inflation au-delà du seuil **et** chômage en hausse.
 
 **Données** — chômage : OIT, modélisé (Banque mondiale) ; inflation : Banque mondiale (Ha-Kose-Ohnsorge) ;
-régions : API Banque mondiale. 180 pays ; trous ≤ 2 ans interpolés.
+régions : API Banque mondiale. 180 pays ; trous ≤ 2 ans interpolés ; inflation > {HYPER} % (hyperinflation) masquée.
 """
 
 guide_btn = pn.widgets.Button(name="Guide", icon="help-circle", button_type="primary", button_style="outline",
                               width=100, sizing_mode="fixed")
 
+CHIP_CSS = f"""
+.bk-btn {{ border-radius:999px !important; font:500 12.5px {FONT} !important; padding:0 12px !important;
+          background:color-mix(in srgb, {ACCENT} 14%, transparent) !important; color:{TEXT} !important;
+          border:1px solid color-mix(in srgb, {ACCENT} 45%, transparent) !important }}
+.bk-btn:hover {{ background:color-mix(in srgb, {ACCENT} 28%, transparent) !important }}
+"""
+
+
+def chip(text, on_remove):
+    """Pastille d'un filtre actif ; un clic retire ce filtre."""
+    b = pn.widgets.Button(name=f"{text}  ✕", sizing_mode="fixed", width=int(len(text) * 7.4) + 46, height=30,
+                          margin=(4, 4), stylesheets=[CHIP_CSS], description="Retirer ce filtre")
+    b.on_click(lambda _: on_remove())
+    return b
+
+
+def without(widget, item):
+    widget.value = [x for x in widget.value if x != item]
+
+
+def filters_bar(regions, incomes, chosen, d):
+    """Toujours visible au-dessus des onglets : ce que montrent TOUS les onglets, et les filtres à retirer."""
+    chips = []
+    for widget, values in [(region, regions), (income, incomes)]:
+        chips += [chip(v, lambda w=widget, v=v: without(w, v)) for v in values]
+    chips += [chip(NAMES[iso], lambda iso=iso: without(countries, iso)) for iso in chosen]
+    n = d.iso3.nunique()
+    if not chips:
+        return pn.Spacer(height=0)
+    head = html(f'<div class="sub" style="padding-top:9px">Tous les onglets filtrés · <b style="color:{TEXT}">{n} pays'
+                '</b></div>', margin=(4, 4), sizing_mode="fixed", width=230)
+    clear = pn.widgets.Button(name="Tout effacer", button_type="light", button_style="outline", sizing_mode="fixed",
+                              width=110, height=30, margin=(4, 4))
+    clear.on_click(reset_filters)
+    return pn.FlexBox(head, *chips, clear, align_items="center")
+
+
 main = pn.Column(
-    html('<div class="hero"><h1>Quand le chômage monte, l\'inflation baisse-t-elle ?</h1>'
-         '<p>Courbe de Phillips · 180 pays · 1991–2021 · Banque mondiale & OIT</p></div>', margin=(0, 7, 14, 7)),
-    html(pn.bind(kpis_html, data, base, measure, infl_thr, unemp_thr), margin=(0, 7)),
+    html('<div class="hero"><h1>Quand le chômage monte, l\'inflation baisse-t-elle ?</h1></div>', margin=(0, 7, 10, 7)),
+    pn.panel(pn.bind(filters_bar, region, income, countries, data), margin=(0, 3, 8, 3)),
+    html(pn.bind(kpis_html, data, BASE, infl_thr, unemp_thr, year), margin=(0, 7)),
     tabs,
 )
 
@@ -804,12 +952,11 @@ def label(text):
 
 
 sidebar = [
-    label("Filtres"), years, measure, pn.Row(no_hyper, pn.pane.HTML(f"Exclure l'hyperinflation (> {HYPER} %)",
-                                                                     styles={"color": TEXT2, "font-size": "13px"},
-                                                                     margin=(10, 0))),
-    region, income, profile,
-    label("Seuils d'alerte"), infl_thr, unemp_thr,
-    label("Légende"), html(pn.bind(legend_html, infl_thr), margin=(4, 10)),
+    label("Année affichée"), year,
+    label("Filtres · tous les onglets"), region, income, countries,
+    html(f'<div class="sub" style="padding-top:0">Astuce : cliquer un pays sur la carte, dans un nuage ou dans un '
+         f'tableau l\'ajoute au filtre Pays.</div>', margin=(0, 10)),
+    label("Légende"), html(legend_html(), margin=(4, 10)),
     pn.Spacer(height=10), reset,
 ]
 
